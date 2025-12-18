@@ -1,0 +1,5 @@
+"What's Pulse Feed?","A tiny social-feed UI where each CSV row becomes a post + reply."
+"How do I search?","Use the search box (or press / to focus, Esc to clear)."
+"How do I toggle dark mode?","Click the toggle button (or press D)."
+"Can I upload my own CSV?","Yes — use Upload CSV or drag & drop a .csv file."
+"CSV format?","Column 1 = post text, Column 2 = reply text; extra columns ignored."

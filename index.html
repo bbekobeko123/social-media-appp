@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pulse Feed</title>
+  <meta name="description" content="A tiny social-feed UI where each CSV row becomes a post." />
+  <meta name="theme-color" content="#0f1419" />
+  <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="stylesheet" href="./styles.css?v=20" />
+  <script src="./bootstrap.js?v=20"></script>
+</head>
+
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <div class="app" id="app">
+    <input id="csvInput" class="sr-only" type="file" accept=".csv,text/csv" />
+
+    <aside class="sidebar" aria-label="Primary">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">PF</div>
+        <div class="brand-text">
+          <div class="brand-name">Pulse Feed</div>
+          <div class="brand-tag">@pulse</div>
+        </div>
+      </div>
+
+      <nav class="nav" aria-label="Navigation">
+        <button class="nav-item is-active" type="button" data-view="home">
+          <span class="nav-label">Home</span>
+        </button>
+        <button class="nav-item" type="button" data-view="explore">
+          <span class="nav-label">Explore</span>
+        </button>
+        <button class="nav-item" type="button" data-view="bookmarks">
+          <span class="nav-label">Bookmarks</span>
+        </button>
+        <button class="nav-item" type="button" data-view="profile">
+          <span class="nav-label">Profile</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <button id="themeToggle" class="btn secondary" type="button" title="Toggle theme (D)">
+          Theme
+        </button>
+        <label class="btn secondary file" for="csvInput">
+          Upload CSV
+        </label>
+      </div>
+    </aside>
+
+    <main id="main" class="main" aria-label="Timeline">
+      <header class="topbar">
+        <h1 id="pageTitle" class="title">Home</h1>
+        <label class="search">
+          <span class="sr-only">Search</span>
+          <input id="search" type="search" inputmode="search" autocomplete="off" placeholder="Search posts" />
+        </label>
+        <div class="top-actions">
+          <div class="actions-group">
+            <button id="clearBookmarks" class="btn ghost" type="button" hidden>Clear bookmarks</button>
+            <button id="undoUpload" class="btn secondary" type="button" hidden>Undo upload</button>
+
+            <div class="dropdown" id="moreDropdown">
+              <button id="moreBtn" class="btn secondary icon-only" type="button" aria-label="More actions"
+                aria-haspopup="true" aria-expanded="false">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="1" />
+                  <circle cx="12" cy="5" r="1" />
+                  <circle cx="12" cy="19" r="1" />
+                </svg>
+              </button>
+              <div class="dropdown-menu" id="moreMenu" hidden>
+                <button id="manageFeed" class="dropdown-item" type="button">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                  </svg>
+                  <span>Edit feed</span>
+                </button>
+                <button id="shuffleFeed" class="dropdown-item" type="button">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="16 3 21 3 21 8" />
+                    <line x1="4" y1="20" x2="21" y2="3" />
+                    <polyline points="21 16 21 21 16 21" />
+                    <line x1="15" y1="15" x2="21" y2="21" />
+                    <line x1="4" y1="4" x2="9" y2="9" />
+                  </svg>
+                  <span>Shuffle</span>
+                </button>
+                <button id="downloadFeed" class="dropdown-item" type="button">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="7 10 12 15 17 10" />
+                    <line x1="12" y1="15" x2="12" y2="3" />
+                  </svg>
+                  <span>Download feed</span>
+                </button>
+                <hr class="dropdown-divider">
+                <button id="clearFeed" class="dropdown-item danger" type="button">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="3 6 5 6 21 6" />
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                    <line x1="10" y1="11" x2="10" y2="17" />
+                    <line x1="14" y1="11" x2="14" y2="17" />
+                  </svg>
+                  <span>Clear feed</span>
+                </button>
+              </div>
+            </div>
+            <label class="btn primary has-icon mobile-upload" for="csvInput">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+              <span class="btn-text">Upload CSV</span>
+            </label>
+          </div>
+        </div>
+      </header>
+
+      <section id="composer" class="composer" aria-label="Compose">
+        <div class="composer-inner">
+          <div class="avatar avatar-me" aria-hidden="true">You</div>
+          <div class="composer-box">
+            <label class="sr-only" for="composerText">Post text</label>
+            <textarea id="composerText" rows="3" maxlength="280" placeholder="What's happening?"></textarea>
+            <div class="composer-row">
+              <div class="muted">
+                <span id="charLeft">280</span> left
+              </div>
+              <button id="postBtn" class="btn primary" type="button" disabled>Post</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="feed">
+        <div id="status" class="status" role="status" aria-live="polite"></div>
+        <div id="feed" class="feed-list"></div>
+      </section>
+    </main>
+
+    <aside class="aside" aria-label="Sidebar">
+      <div class="card">
+        <h2 class="card-title">Shortcuts</h2>
+        <ul class="list">
+          <li><kbd>/</kbd> focus search</li>
+          <li><kbd>Esc</kbd> clear search</li>
+          <li><kbd>D</kbd> toggle theme</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">CSV format</h2>
+        <p class="muted">
+          Column 1 = post text, Column 2 = reply text (optional). Extra columns are ignored.
+        </p>
+        <p class="muted">
+          Tip: drag &amp; drop a <code>.csv</code> file anywhere on the page to load it.
+        </p>
+      </div>
+    </aside>
+
+    <div id="dropOverlay" class="drop-overlay" hidden>
+      <div class="drop-card">
+        <div class="drop-title">Drop your CSV to load</div>
+        <div class="muted">Each row becomes a post.</div>
+      </div>
+    </div>
+
+    <div id="profileModal" class="modal" hidden>
+      <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="profileModalTitle">
+        <div class="modal-header">
+          <div>
+            <div class="modal-kicker">Profile</div>
+            <h2 id="profileModalTitle" class="modal-title">Appearance</h2>
+          </div>
+          <button id="closeProfileModal" class="icon-btn" type="button" aria-label="Close dialog">
+            ×
+          </button>
+        </div>
+        <div class="modal-body">
+          <p class="muted">Switch between light and dark modes.</p>
+          <button id="profileModalThemeToggle" class="btn secondary" type="button">Toggle theme</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="csvChoiceModal" class="modal" hidden>
+      <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="csvChoiceTitle">
+        <div class="modal-header">
+          <div>
+            <div class="modal-kicker">Upload</div>
+            <h2 id="csvChoiceTitle" class="modal-title">Load CSV</h2>
+          </div>
+          <button id="closeCsvChoiceModal" class="icon-btn" type="button" aria-label="Close dialog">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="muted" id="csvChoiceMessage">How would you like to load this CSV?</p>
+          <p class="muted" id="csvChoiceMeta"></p>
+          <div class="modal-actions">
+            <button id="csvChoiceReplace" class="btn primary" type="button">Replace current feed</button>
+            <button id="csvChoiceAppend" class="btn secondary" type="button">Add to current feed</button>
+            <button id="csvChoiceCancel" class="btn ghost" type="button">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="feedManagerModal" class="modal" hidden>
+      <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="feedManagerTitle">
+        <div class="modal-header">
+          <div>
+            <div class="modal-kicker">Feed</div>
+            <h2 id="feedManagerTitle" class="modal-title">Manage uploaded CSVs</h2>
+          </div>
+          <button id="closeFeedManager" class="icon-btn" type="button" aria-label="Close dialog">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="muted">See uploaded CSV files and remove any you no longer want in this feed.</p>
+          <div id="feedFileList" class="file-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="clearFeedModal" class="modal" hidden>
+      <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="clearFeedTitle"
+        aria-describedby="clearFeedDesc">
+        <div class="modal-header">
+          <div>
+            <div class="modal-kicker">Feed</div>
+            <h2 id="clearFeedTitle" class="modal-title">Clear feed</h2>
+          </div>
+          <button id="closeClearFeedModal" class="icon-btn" type="button" aria-label="Close dialog">×</button>
+        </div>
+        <div class="modal-body">
+          <p id="clearFeedDesc" class="muted">
+            This resets your feed to the bundled CSV and clears your local likes, bookmarks, posts, and uploaded CSVs.
+          </p>
+          <div class="modal-actions">
+            <button id="clearFeedCancel" class="btn ghost" type="button">Cancel</button>
+            <button id="clearFeedConfirm" class="btn primary danger" type="button">Clear feed</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="resetDataModal" class="modal" hidden>
+      <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="resetDataTitle"
+        aria-describedby="resetDataDesc">
+        <div class="modal-header">
+          <div>
+            <div class="modal-kicker">Storage</div>
+            <h2 id="resetDataTitle" class="modal-title">Reset local data</h2>
+          </div>
+          <button id="closeResetDataModal" class="icon-btn" type="button" aria-label="Close dialog">Į-</button>
+        </div>
+        <div class="modal-body">
+          <p id="resetDataDesc" class="muted">
+            This permanently deletes your local posts, likes, bookmarks, uploaded CSVs, and settings, then restores the
+            bundled feed.
+          </p>
+          <div class="modal-actions">
+            <button id="resetDataCancel" class="btn ghost" type="button">Cancel</button>
+            <button id="resetDataConfirm" class="btn primary danger" type="button">Reset local data</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./app.js?v=20"></script>
+</body>
+
+</html>
