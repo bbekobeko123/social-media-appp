@@ -1,6 +1,6 @@
 const BUNDLED_CSV_PATH = "./flashcards.csv";
 const MAX_CSV_BYTES = 5 * 1024 * 1024;
-const APP_VERSION = "20";
+const APP_VERSION = "21";
 
 const STORAGE_KEYS = {
   theme: "pf_theme",
@@ -10,6 +10,7 @@ const STORAGE_KEYS = {
   userPosts: "pf_user_posts",
   likedIds: "pf_liked_ids",
   bookmarkedIds: "pf_bookmarked_ids",
+  savedFeeds: "pf_saved_feeds",
 };
 
 const el = {
@@ -28,13 +29,13 @@ const el = {
   composerText: document.getElementById("composerText"),
   charLeft: document.getElementById("charLeft"),
   postBtn: document.getElementById("postBtn"),
+  newFeed: document.getElementById("newFeed"),
   themeToggle: document.getElementById("themeToggle"),
   navItems: Array.from(document.querySelectorAll(".nav-item[data-view]")),
   csvInput: document.getElementById("csvInput"),
-  downloadFeed: document.getElementById("downloadFeed"),
-  manageFeed: document.getElementById("manageFeed"),
-  shuffleFeed: document.getElementById("shuffleFeed"),
-  undoUpload: document.getElementById("undoUpload"),
+  uploadCsvBtn: document.getElementById("uploadCsvBtn"),
+  mobileUploadBtn: document.getElementById("mobileUploadBtn"),
+
   moreDropdown: document.getElementById("moreDropdown"),
   moreBtn: document.getElementById("moreBtn"),
   moreMenu: document.getElementById("moreMenu"),
@@ -85,6 +86,12 @@ const state = {
   justAddedPostId: null,
   shuffleOrder: null,
   lastUploadSnapshot: null,
+  savedFeeds: [],
+
+  activeFeedId: null,
+  previewReturn: null,
+  previewedFeedMeta: null,
+  stashedWorkspace: null,
   storage: { persisted: null, usage: null, quota: null },
 };
 
@@ -399,18 +406,19 @@ function normalizeBackupPayload(raw) {
 }
 
 function buildUserPostsFromBackup(posts) {
+  console.log(`[buildUserPostsFromBackup] Restoring ${posts.length} posts`);
   return posts
-    .map((p) =>
-      createPost({
-        idSeed: p.idSeed,
+    .map((p) => {
+      console.log(`[buildUserPostsFromBackup] Restoring post: ${p.text}`);
+      return createPost({
+        idSeed: p.idSeed || `user|${p.createdAt}|${p.text}`,
         author: USER_AUTHOR,
         createdAt: p.createdAt,
         text: p.text,
         replyText: "",
-      }),
-    )
-    .filter(Boolean)
-    .slice(0, 50);
+      });
+    })
+    .filter(Boolean);
 }
 
 async function importLocalDataFile(file) {
@@ -766,6 +774,371 @@ function persistBookmarkedIds() {
   writeJson(STORAGE_KEYS.bookmarkedIds, Array.from(state.bookmarkedIds));
 }
 
+function normalizeSavedFeed(raw) {
+  if (!raw || typeof raw !== "object") return null;
+
+  let changed = false;
+  let id = typeof raw.id === "string" ? raw.id : "";
+  if (!id) {
+    id = `f_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    changed = true;
+  }
+
+  const name = typeof raw.name === "string" && raw.name.trim() ? raw.name : "Untitled Feed";
+  if (name !== raw.name) changed = true;
+
+  let createdAt = Number(raw.createdAt);
+  if (!Number.isFinite(createdAt)) {
+    createdAt = Date.now();
+    changed = true;
+  }
+
+  let csvFilesRaw = Array.isArray(raw.csvFiles) ? raw.csvFiles : Array.isArray(raw.csv?.files) ? raw.csv.files : [];
+  if (csvFilesRaw.length === 0 && typeof raw.csvText === "string") {
+    const fallbackName = typeof raw.csvName === "string" && raw.csvName.trim() ? raw.csvName : "uploaded.csv";
+    csvFilesRaw = [{ name: fallbackName, text: raw.csvText }];
+    changed = true;
+  }
+  const csvFiles = csvFilesRaw
+    .map((file) => {
+      if (!file || typeof file !== "object") return null;
+      const fileName = typeof file.name === "string" ? file.name : "";
+      const text = typeof file.text === "string" ? file.text : null;
+      if (!fileName || text === null) return null;
+      return { name: fileName, text };
+    })
+    .filter(Boolean);
+
+  if (csvFiles.length !== csvFilesRaw.length) changed = true;
+
+  const userPosts = Array.isArray(raw.userPosts) ? raw.userPosts.filter((post) => post && typeof post === "object") : [];
+  const likedIds = Array.isArray(raw.likedIds) ? raw.likedIds.filter((id) => typeof id === "string") : [];
+  const bookmarkedIds = Array.isArray(raw.bookmarkedIds)
+    ? raw.bookmarkedIds.filter((id) => typeof id === "string")
+    : [];
+  const csvPosts = Array.isArray(raw.csvPosts) ? raw.csvPosts.filter(Boolean) : [];
+  let csvPostCount = Number.isFinite(raw.csvPostCount) ? raw.csvPostCount : null;
+  if (csvPostCount === null && csvPosts.length > 0) csvPostCount = csvPosts.length;
+
+  const source = raw.source && typeof raw.source === "object"
+    ? raw.source
+    : raw.csv && typeof raw.csv === "object" && raw.csv.source && typeof raw.csv.source === "object"
+      ? raw.csv.source
+      : null;
+
+  if (!source && raw.source) changed = true;
+
+  return {
+    feed: {
+      id,
+      name,
+      createdAt,
+      source,
+      csvFiles,
+      csvPosts,
+      csvPostCount,
+      userPosts,
+      likedIds,
+      bookmarkedIds,
+    },
+    changed,
+  };
+}
+
+function loadSavedFeeds() {
+  const raw = readJson(STORAGE_KEYS.savedFeeds, []);
+  if (!Array.isArray(raw)) return [];
+  let changed = false;
+  const feeds = raw
+    .map((item) => {
+      const normalized = normalizeSavedFeed(item);
+      if (!normalized) return null;
+      if (normalized.changed) changed = true;
+      return normalized.feed;
+    })
+    .filter(Boolean);
+  if (changed) scheduleSavedFeedsPersist();
+  return feeds;
+}
+
+function persistSavedFeeds() {
+  writeJson(STORAGE_KEYS.savedFeeds, state.savedFeeds);
+}
+
+let savedFeedsPersistQueued = false;
+
+function scheduleSavedFeedsPersist() {
+  if (savedFeedsPersistQueued) return;
+  savedFeedsPersistQueued = true;
+
+  const persist = () => {
+    savedFeedsPersistQueued = false;
+    persistSavedFeeds();
+  };
+
+  if (typeof requestIdleCallback === "function") {
+    requestIdleCallback(persist, { timeout: 2000 });
+  } else {
+    window.setTimeout(persist, 0);
+  }
+}
+
+function countCsvPostsInText(text) {
+  const delimiter = detectDelimiter(text);
+  const rows = parseCsv(text, delimiter);
+  let count = 0;
+  for (const row of rows) {
+    const postText = String(row?.[0] ?? "").trim();
+    if (postText) count += 1;
+  }
+  return count;
+}
+
+function getSavedFeedPostCount(feed) {
+  if (!feed || typeof feed !== "object") return 0;
+  const userCount = Array.isArray(feed.userPosts) ? feed.userPosts.length : 0;
+  let csvPostCount = Number.isFinite(feed.csvPostCount) ? feed.csvPostCount : null;
+  if (csvPostCount === null && Array.isArray(feed.csvPosts)) csvPostCount = feed.csvPosts.length;
+  if (csvPostCount === null && Array.isArray(feed.csvFiles)) {
+    csvPostCount = feed.csvFiles.reduce((total, file) => {
+      if (!file || typeof file.text !== "string") return total;
+      return total + countCsvPostsInText(file.text);
+    }, 0);
+    feed.csvPostCount = csvPostCount;
+  }
+  if (!Number.isFinite(csvPostCount)) csvPostCount = 0;
+  return userCount + csvPostCount;
+}
+
+function captureCurrentFeedSnapshot(name = "Untitled Feed") {
+  const timestamp = Date.now();
+  const random = Math.random().toString(36).substring(2, 9);
+  return {
+    id: `f_${timestamp}_${random}`,
+    name,
+    createdAt: timestamp,
+    source: { ...state.source },
+    csvFiles: readStoredCsvFiles(),
+    csvPostCount: Array.isArray(state.csvPosts) ? state.csvPosts.length : 0,
+    userPosts: state.userPosts.map((p) => ({ idSeed: p.idSeed || `user|${p.createdAt}|${p.text}`, createdAt: p.createdAt, text: p.text })),
+    likedIds: Array.from(state.likedIds),
+    // Note: bookmarkedIds are stored globally, not per-feed
+  };
+}
+
+
+async function createNewFeed() {
+  const name = prompt("Enter a name for this feed:", `Feed ${new Date().toLocaleDateString()}`);
+  if (name === null) return; // Cancelled
+
+  // 1. Archive current feed if it has any user data
+  const hasData = state.userPosts.length > 0 || state.source.kind === "uploaded" || state.likedIds.size > 0 || state.bookmarkedIds.size > 0;
+  if (hasData) {
+    const snapshot = captureCurrentFeedSnapshot(name || "Untitled Feed");
+    state.savedFeeds.unshift(snapshot);
+    persistSavedFeeds();
+  }
+
+  // 2. Reset current state
+  await clearFeedConfirmed();
+  setStatus("New feed created.");
+}
+
+function savePreviewedFeed() {
+  const meta = state.previewedFeedMeta;
+  if (!meta) return;
+
+  const snapshot = captureCurrentFeedSnapshot(meta.name || "Untitled Feed");
+  snapshot.id = meta.id;
+  if (Number.isFinite(meta.createdAt)) snapshot.createdAt = meta.createdAt;
+
+  // Update the feed in-place to preserve its position in the list
+  const feedIndex = state.savedFeeds.findIndex((feed) => feed.id === meta.id);
+  if (feedIndex !== -1) {
+    state.savedFeeds[feedIndex] = snapshot;
+  } else {
+    // Feed not in list (shouldn't happen), add it
+    state.savedFeeds.unshift(snapshot);
+  }
+  persistSavedFeeds();
+}
+
+async function loadFeed(feedId) {
+  console.log(`[loadFeed] Start loading feed: ${feedId}`);
+
+  // Don't reload if already viewing this feed
+  if (state.activeFeedId === feedId) {
+    console.log(`[loadFeed] Already viewing feed: ${feedId}`);
+    setView("home");
+    return;
+  }
+
+  const feed = state.savedFeeds.find((f) => f.id === feedId);
+  if (!feed) {
+    console.warn(`[loadFeed] Feed not found: ${feedId}`);
+    return;
+  }
+
+  // 2. Handle Current Workspace
+  if (state.stashedWorkspace) {
+    // We're already viewing a saved feed, need to save it before switching
+    if (state.previewedFeedMeta) {
+      console.log("[loadFeed] Switching preview feeds. Saving current preview back to list.");
+      savePreviewedFeed();
+    }
+    // If previewReturn exists but previewedFeedMeta doesn't, we may be in an inconsistent state
+    // Just proceed to load the new feed
+  } else {
+    // We are in the Main Workspace. Stash it!
+    console.log(`[loadFeed] Stashing current main workspace.`);
+    state.stashedWorkspace = captureCurrentFeedSnapshot("Stashed Workspace");
+  }
+
+  // Always set the previewed feed metadata for the feed we're about to load
+  state.previewedFeedMeta = { id: feed.id, name: feed.name, createdAt: feed.createdAt };
+
+  // 3. Apply New Feed Data
+  state.activeFeedId = feed.id;
+  persistSavedFeeds();
+
+  console.log(`[loadFeed] Applying data for: ${feed.name}`);
+
+  // Apply feed data
+  state.userPosts = buildUserPostsFromBackup(feed.userPosts || []);
+  state.likedIds = new Set(feed.likedIds || []);
+  // Note: bookmarkedIds are global and not loaded from feed
+  persistUserPosts();
+  persistLikedIds();
+
+  if (Array.isArray(feed.csvFiles) && feed.csvFiles.length > 0) {
+    persistCsvFiles(feed.csvFiles);
+    state.source = {
+      kind: "uploaded",
+      name: feed.csvFiles[0].name,
+      files: feed.csvFiles.map((f) => f.name),
+    };
+    state.csvPosts = buildPostsFromFiles(feed.csvFiles);
+  } else if (Array.isArray(feed.csvPosts) && feed.csvPosts.length > 0) {
+    safeRemoveItem(STORAGE_KEYS.csvFiles);
+    safeRemoveItem(STORAGE_KEYS.csvText);
+    safeRemoveItem(STORAGE_KEYS.csvName);
+
+    state.source = feed.source && typeof feed.source === "object"
+      ? feed.source
+      : { kind: "bundled", name: "flashcards.csv", files: ["flashcards.csv"] };
+    state.csvPosts = feed.csvPosts;
+  } else {
+    // IMPORTANT: Clear CSV storage when loading a bundled feed to prevent pollution
+    safeRemoveItem(STORAGE_KEYS.csvFiles);
+    safeRemoveItem(STORAGE_KEYS.csvText);
+    safeRemoveItem(STORAGE_KEYS.csvName);
+
+    state.source = { kind: "bundled", name: "flashcards.csv", files: ["flashcards.csv"] };
+    const csvText = await loadBundledCsvText();
+    state.csvPosts = buildCsvPosts(csvText, "flashcards.csv");
+  }
+
+  state.shuffleOrder = null;
+  state.lastUploadSnapshot = null;
+  state.query = "";
+  el.search.value = "";
+  setView("home");
+  render();
+  setStatus(`Viewing feed: ${feed.name}`);
+}
+
+async function returnToWorkspace() {
+  if (!state.stashedWorkspace) return;
+
+  console.log("[returnToWorkspace] Returning to workspace...");
+
+  // 1. Save changes to current feed (the one we are leaving) using savePreviewedFeed
+  if (state.previewedFeedMeta) {
+    savePreviewedFeed();
+  }
+
+  // 2. Clear preview state
+  state.previewedFeedMeta = null;
+  state.previewReturn = null;
+  state.activeFeedId = null;
+
+  // 3. Restore Stashed Workspace
+  const stash = state.stashedWorkspace;
+  state.stashedWorkspace = null; // Clear stash
+
+  console.log("[returnToWorkspace] Restoring stashed workspace");
+  state.userPosts = buildUserPostsFromBackup(stash.userPosts || []);
+  state.likedIds = new Set(stash.likedIds || []);
+  // Note: bookmarkedIds are global and not restored from stash
+  state.source = stash.source;
+
+  persistUserPosts();
+  persistLikedIds();
+
+  if (stash.csvFiles && stash.csvFiles.length > 0) {
+    persistCsvFiles(stash.csvFiles);
+    state.csvPosts = buildPostsFromFiles(stash.csvFiles);
+  } else {
+    safeRemoveItem(STORAGE_KEYS.csvFiles);
+    safeRemoveItem(STORAGE_KEYS.csvText);
+    safeRemoveItem(STORAGE_KEYS.csvName);
+    const csvText = await loadBundledCsvText();
+    state.csvPosts = buildCsvPosts(csvText, "flashcards.csv");
+  }
+
+  state.query = "";
+  el.search.value = "";
+  setView("home");
+  render();
+  setStatus("Returned to main workspace.");
+}
+
+async function returnFromPreview() {
+  if (!state.previewReturn) return;
+
+  console.log("[returnFromPreview] Returning to current feed...");
+
+  savePreviewedFeed();
+
+  const { snapshot, activeFeedId } = state.previewReturn;
+  state.previewReturn = null;
+  state.previewedFeedMeta = null;
+  state.activeFeedId = activeFeedId ?? null;
+
+  state.userPosts = buildUserPostsFromBackup(snapshot.userPosts || []);
+  state.likedIds = new Set(snapshot.likedIds || []);
+  // Note: bookmarkedIds are global and not restored from snapshot
+  state.source = snapshot.source;
+
+  persistUserPosts();
+  persistLikedIds();
+
+  if (snapshot.csvFiles && snapshot.csvFiles.length > 0) {
+    persistCsvFiles(snapshot.csvFiles);
+    state.csvPosts = buildPostsFromFiles(snapshot.csvFiles);
+  } else {
+    safeRemoveItem(STORAGE_KEYS.csvFiles);
+    safeRemoveItem(STORAGE_KEYS.csvText);
+    safeRemoveItem(STORAGE_KEYS.csvName);
+    const csvText = await loadBundledCsvText();
+    state.csvPosts = buildCsvPosts(csvText, "flashcards.csv");
+  }
+
+  state.query = "";
+  el.search.value = "";
+  setView("home");
+  render();
+  setStatus("Returned to current feed.");
+}
+
+async function deleteFeed(feedId) {
+  if (!confirm("Are you sure you want to delete this feed permanently?")) return;
+  state.savedFeeds = state.savedFeeds.filter((f) => f.id !== feedId);
+  persistSavedFeeds();
+  renderExplore();
+  setStatus("Feed deleted.");
+}
+
 let themeTransitionToken = 0;
 
 function beginThemeTransition() {
@@ -840,6 +1213,56 @@ function toggleTheme() {
 
 function mergePosts() {
   return [...state.userPosts, ...state.csvPosts];
+}
+
+// Gathers posts from ALL sources for the Bookmarks view
+// This ensures bookmarked posts from any feed are visible
+function getAllPostsForBookmarks() {
+  const allPosts = new Map(); // Use Map to dedupe by post ID
+
+  // Add current feed posts
+  for (const post of mergePosts()) {
+    if (post?.id) allPosts.set(post.id, post);
+  }
+
+  // Add posts from stashed workspace (if any)
+  if (state.stashedWorkspace) {
+    const stashUserPosts = buildUserPostsFromBackup(state.stashedWorkspace.userPosts || []);
+    for (const post of stashUserPosts) {
+      if (post?.id && !allPosts.has(post.id)) allPosts.set(post.id, post);
+    }
+    if (state.stashedWorkspace.csvFiles?.length > 0) {
+      const stashCsvPosts = buildPostsFromFiles(state.stashedWorkspace.csvFiles);
+      for (const post of stashCsvPosts) {
+        if (post?.id && !allPosts.has(post.id)) allPosts.set(post.id, post);
+      }
+    }
+  }
+
+  // Add posts from all saved feeds
+  for (const feed of state.savedFeeds) {
+    if (!feed) continue;
+
+    // User posts from saved feed
+    const feedUserPosts = buildUserPostsFromBackup(feed.userPosts || []);
+    for (const post of feedUserPosts) {
+      if (post?.id && !allPosts.has(post.id)) allPosts.set(post.id, post);
+    }
+
+    // CSV posts from saved feed
+    if (feed.csvFiles?.length > 0) {
+      const feedCsvPosts = buildPostsFromFiles(feed.csvFiles);
+      for (const post of feedCsvPosts) {
+        if (post?.id && !allPosts.has(post.id)) allPosts.set(post.id, post);
+      }
+    } else if (feed.csvPosts?.length > 0) {
+      for (const post of feed.csvPosts) {
+        if (post?.id && !allPosts.has(post.id)) allPosts.set(post.id, post);
+      }
+    }
+  }
+
+  return Array.from(allPosts.values());
 }
 
 function getPostsInOrder() {
@@ -1060,13 +1483,39 @@ function updateViewUi() {
   if (searchWrap instanceof HTMLElement) searchWrap.hidden = !showSearch;
   if (el.clearSearch) el.clearSearch.hidden = !showSearch;
 
-  const hideTopActions = state.view === "profile";
+  const hideTopActions = state.view === "profile" || state.view === "bookmarks";
   if (el.moreDropdown) el.moreDropdown.hidden = hideTopActions;
   if (el.undoUpload) el.undoUpload.hidden = hideTopActions || !state.lastUploadSnapshot;
+  if (el.uploadCsvBtn) el.uploadCsvBtn.hidden = hideTopActions;
+  if (el.mobileUploadBtn) el.mobileUploadBtn.hidden = hideTopActions;
 
   for (const item of el.navItems) {
     const isActive = item.dataset.view === state.view;
     item.classList.toggle("is-active", isActive);
+  }
+
+  // Handle back button visibility
+  let backBtn = document.getElementById("backToWorkspaceBtn");
+  const showPreviewBack = Boolean(state.previewReturn);
+  const showWorkspaceBack = !showPreviewBack && Boolean(state.stashedWorkspace);
+  if (showPreviewBack || showWorkspaceBack) {
+    if (!backBtn) {
+      backBtn = document.createElement("button");
+      backBtn.id = "backToWorkspaceBtn";
+      backBtn.className = "btn secondary full-width";
+      backBtn.style.marginBottom = "1rem";
+      backBtn.type = "button";
+      // Insert before the composer
+      if (el.composerText && el.composerText.closest(".composer")) {
+        el.composerText.closest(".composer").before(backBtn);
+      } else if (el.feed) {
+        el.feed.prepend(backBtn);
+      }
+    }
+    backBtn.textContent = showPreviewBack ? "Back to current feed" : "Back to main workspace";
+    backBtn.onclick = showPreviewBack ? returnFromPreview : returnToWorkspace;
+  } else if (backBtn) {
+    backBtn.remove();
   }
 }
 
@@ -1285,13 +1734,23 @@ function render() {
     return;
   }
 
-  const posts = mergePosts();
-  const inView =
-    state.view === "bookmarks" ? posts.filter((p) => state.bookmarkedIds.has(p.id)) : posts;
+  // For bookmarks view, use ALL posts from all feeds
+  // For other views, use only current feed posts
+  const isBookmarksView = state.view === "bookmarks";
+  const posts = isBookmarksView ? getAllPostsForBookmarks() : mergePosts();
+  const inView = isBookmarksView
+    ? posts.filter((p) => state.bookmarkedIds.has(p.id))
+    : posts;
 
-  const ordered = getPostsInOrder();
-  const orderedFiltered =
-    state.view === "bookmarks" ? ordered.filter((p) => state.bookmarkedIds.has(p.id)) : ordered;
+  // For bookmarks, sort by most recently bookmarked (we don't have timestamp, so use createdAt)
+  // For other views, use shuffle order if available
+  let orderedFiltered;
+  if (isBookmarksView) {
+    orderedFiltered = inView.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+  } else {
+    const ordered = getPostsInOrder();
+    orderedFiltered = ordered;
+  }
 
   const q = String(state.query ?? "").trim().toLowerCase();
   const visible = q
@@ -1307,7 +1766,7 @@ function render() {
   if (visible.length === 0) {
     const empty = document.createElement("div");
     empty.className = "status";
-    if (state.view === "bookmarks") {
+    if (isBookmarksView) {
       empty.textContent = q ? "No bookmarks match your search." : "No bookmarks yet.";
     } else {
       empty.textContent = q ? "No posts match your search." : "No posts to show.";
@@ -1322,13 +1781,21 @@ function render() {
 
   const sourceLabel = getSourceLabel();
 
-  const viewLabel = state.view === "bookmarks" ? "bookmarks" : "posts";
-  const totalInView = inView.length;
-  setStatus(
-    q
-      ? `Showing ${visible.length} of ${totalInView} ${viewLabel}. Source: ${sourceLabel}.`
-      : `Loaded ${totalInView} ${viewLabel}. Source: ${sourceLabel}.`,
-  );
+  if (isBookmarksView) {
+    setStatus(
+      q
+        ? `Showing ${visible.length} of ${inView.length} bookmarks.`
+        : `${inView.length} bookmarks from all feeds.`,
+    );
+  } else {
+    const viewLabel = "posts";
+    const totalInView = inView.length;
+    setStatus(
+      q
+        ? `Showing ${visible.length} of ${totalInView} ${viewLabel}. Source: ${sourceLabel}.`
+        : `Loaded ${totalInView} ${viewLabel}. Source: ${sourceLabel}.`,
+    );
+  }
 
   if (el.clearBookmarks) el.clearBookmarks.disabled = state.bookmarkedIds.size === 0;
 }
@@ -1480,6 +1947,83 @@ function renderExplore() {
 
   const grid = document.createElement("div");
   grid.className = "explore-grid";
+
+  // --- NEW: Your Feeds Section ---
+  const feedsCard = document.createElement("div");
+  feedsCard.className = "card feeds-card";
+  const feedsTitle = document.createElement("h2");
+  feedsTitle.className = "card-title";
+  feedsTitle.textContent = "Your Feeds";
+  feedsCard.append(feedsTitle);
+
+  if (state.savedFeeds.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "muted";
+    empty.textContent = "No saved feeds yet. Create one from the 'More' menu.";
+    feedsCard.append(empty);
+  } else {
+    const list = document.createElement("div");
+    list.className = "saved-feeds-list";
+    for (const feed of state.savedFeeds) {
+      const item = document.createElement("div");
+      item.className = "saved-feed-item";
+
+      const info = document.createElement("div");
+      info.className = "feed-info";
+
+      const name = document.createElement("div");
+      name.className = "feed-name";
+      name.textContent = feed.name;
+
+      const meta = document.createElement("div");
+      meta.className = "feed-meta-text";
+      const date = new Date(feed.createdAt).toLocaleDateString();
+      const postsCount = getSavedFeedPostCount(feed);
+      meta.textContent = `${date} · ${postsCount} posts`;
+
+      info.append(name, meta);
+
+      const actions = document.createElement("div");
+      actions.className = "feed-actions";
+
+      // Check if this is the currently active feed
+      const isActiveFeed = state.activeFeedId === feed.id;
+
+      const loadBtn = document.createElement("button");
+      loadBtn.type = "button";
+      loadBtn.dataset.feedId = feed.id;
+
+      if (isActiveFeed) {
+        loadBtn.className = "btn secondary sm";
+        loadBtn.textContent = "Viewing";
+        loadBtn.disabled = true;
+      } else {
+        loadBtn.className = "btn primary sm";
+        loadBtn.dataset.action = "load-feed";
+        loadBtn.textContent = "Continue";
+      }
+
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "btn ghost sm danger-hover";
+      delBtn.dataset.action = "delete-feed";
+      delBtn.dataset.feedId = feed.id;
+      delBtn.textContent = "Delete";
+
+      // Disable delete for active feed
+      if (isActiveFeed) {
+        delBtn.disabled = true;
+        delBtn.title = "Return to main workspace before deleting";
+      }
+
+      actions.append(loadBtn, delBtn);
+      item.append(info, actions);
+      list.append(item);
+    }
+    feedsCard.append(list);
+  }
+  wrapper.append(feedsCard);
+  // --- END OF NEW SECTION ---
 
   const tagsCard = document.createElement("div");
   tagsCard.className = "card";
@@ -1989,6 +2533,7 @@ async function boot() {
   state.userPosts = loadUserPosts();
   state.likedIds = loadLikedIds();
   state.bookmarkedIds = loadBookmarkedIds();
+  state.savedFeeds = loadSavedFeeds();
 
   setStatus("Loading posts...");
   try {
@@ -2133,6 +2678,22 @@ async function boot() {
     closeMoreMenu();
   });
 
+  document.body.addEventListener("click", (e) => {
+    const target = e.target;
+    if (!(target instanceof HTMLElement)) return;
+    const button = target.closest("button");
+    if (!button) return;
+
+    const action = button.dataset.action;
+    if (action === "load-feed") {
+      const feedId = button.dataset.feedId;
+      if (feedId) loadFeed(feedId);
+    } else if (action === "delete-feed") {
+      const feedId = button.dataset.feedId;
+      if (feedId) deleteFeed(feedId);
+    }
+  });
+
   function toggleMoreMenu() {
     const isVisible = el.moreMenu.classList.contains("is-visible");
     if (isVisible) closeMoreMenu();
@@ -2234,6 +2795,13 @@ async function boot() {
     await handleCsvFile(file);
   });
 
+  if (el.newFeed) {
+    el.newFeed.addEventListener("click", () => {
+      createNewFeed();
+      closeMoreMenu();
+    });
+  }
+
   if (el.clearFeed) {
     el.clearFeed.addEventListener("click", () => {
       requestClearFeed();
@@ -2285,6 +2853,18 @@ async function boot() {
       state.explore.selectedTag = null;
       renderExplore();
       setStatus(state.explore.selectedAuthor ? `Filtering by @${handle}.` : "Explore filter cleared.");
+      return;
+    }
+
+    if (action === "load-feed") {
+      const feedId = button.dataset.feedId;
+      if (feedId) loadFeed(feedId);
+      return;
+    }
+
+    if (action === "delete-feed") {
+      const feedId = button.dataset.feedId;
+      if (feedId) deleteFeed(feedId);
       return;
     }
 
