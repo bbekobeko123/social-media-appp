@@ -1,6 +1,6 @@
 const BUNDLED_CSV_PATH = "./flashcards.csv";
 const MAX_CSV_BYTES = 5 * 1024 * 1024;
-const APP_VERSION = "21";
+const APP_VERSION = "22";
 
 const STORAGE_KEYS = {
   theme: "pf_theme",
