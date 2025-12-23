@@ -87,6 +87,7 @@ const state = {
   shuffleOrder: null,
   lastUploadSnapshot: null,
   savedFeeds: [],
+  selectedFeedIds: new Set(),
 
   activeFeedId: null,
   previewReturn: null,
@@ -948,6 +949,9 @@ function savePreviewedFeed() {
   const meta = state.previewedFeedMeta;
   if (!meta) return;
 
+  // Don't save combined/temporary views
+  if (meta.id === "combined-view") return;
+
   const snapshot = captureCurrentFeedSnapshot(meta.name || "Untitled Feed");
   snapshot.id = meta.id;
   if (Number.isFinite(meta.createdAt)) snapshot.createdAt = meta.createdAt;
@@ -1483,7 +1487,7 @@ function updateViewUi() {
   if (searchWrap instanceof HTMLElement) searchWrap.hidden = !showSearch;
   if (el.clearSearch) el.clearSearch.hidden = !showSearch;
 
-  const hideTopActions = state.view === "profile" || state.view === "bookmarks";
+  const hideTopActions = state.view === "profile" || state.view === "bookmarks" || state.view === "explore";
   if (el.moreDropdown) el.moreDropdown.hidden = hideTopActions;
   if (el.undoUpload) el.undoUpload.hidden = hideTopActions || !state.lastUploadSnapshot;
   if (el.uploadCsvBtn) el.uploadCsvBtn.hidden = hideTopActions;
@@ -1938,9 +1942,7 @@ function renderExplore() {
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .slice(0, 8);
 
-  const topAuthors = computeTopAuthors(ordered)
-    .sort((a, b) => b.count - a.count || a.handle.localeCompare(b.handle))
-    .slice(0, 5);
+
 
   const wrapper = document.createElement("div");
   wrapper.className = "explore";
@@ -1962,11 +1964,80 @@ function renderExplore() {
     empty.textContent = "No saved feeds yet. Create one from the 'More' menu.";
     feedsCard.append(empty);
   } else {
+    // Bulk actions bar
+    const bulkBar = document.createElement("div");
+    bulkBar.className = "feeds-bulk-bar";
+
+    const selectAllLabel = document.createElement("label");
+    selectAllLabel.className = "feeds-select-all";
+    const selectAllCheckbox = document.createElement("input");
+    selectAllCheckbox.type = "checkbox";
+    selectAllCheckbox.dataset.action = "select-all-feeds";
+    selectAllCheckbox.checked = state.selectedFeedIds.size === state.savedFeeds.length && state.savedFeeds.length > 0;
+    selectAllCheckbox.indeterminate = state.selectedFeedIds.size > 0 && state.selectedFeedIds.size < state.savedFeeds.length;
+    const selectAllText = document.createElement("span");
+    selectAllText.style.fontWeight = "600";
+    selectAllText.textContent = state.selectedFeedIds.size > 0
+      ? `${state.selectedFeedIds.size} selected`
+      : "Select all";
+    selectAllLabel.append(selectAllCheckbox, selectAllText);
+    bulkBar.append(selectAllLabel);
+
+    if (state.selectedFeedIds.size > 0) {
+      const bulkActions = document.createElement("div");
+      bulkActions.className = "feeds-bulk-actions";
+
+      if (state.selectedFeedIds.size >= 2) {
+        const mergeBtn = document.createElement("button");
+        mergeBtn.type = "button";
+        mergeBtn.className = "btn secondary sm";
+        mergeBtn.dataset.action = "merge-selected-feeds";
+        mergeBtn.textContent = "Merge";
+        bulkActions.append(mergeBtn);
+
+        const viewTogetherBtn = document.createElement("button");
+        viewTogetherBtn.type = "button";
+        viewTogetherBtn.className = "btn secondary sm";
+        viewTogetherBtn.dataset.action = "view-selected-feeds";
+        viewTogetherBtn.textContent = "View Together";
+        bulkActions.append(viewTogetherBtn);
+      }
+
+      const deleteBtn = document.createElement("button");
+      deleteBtn.type = "button";
+      deleteBtn.className = "btn ghost sm danger-hover";
+      deleteBtn.dataset.action = "delete-selected-feeds";
+      deleteBtn.textContent = "Delete";
+      bulkActions.append(deleteBtn);
+
+      const clearBtn = document.createElement("button");
+      clearBtn.type = "button";
+      clearBtn.className = "btn ghost sm";
+      clearBtn.dataset.action = "clear-feed-selection";
+      clearBtn.textContent = "Clear";
+      bulkActions.append(clearBtn);
+
+      bulkBar.append(bulkActions);
+    }
+
+    feedsCard.append(bulkBar);
+
     const list = document.createElement("div");
     list.className = "saved-feeds-list";
     for (const feed of state.savedFeeds) {
       const item = document.createElement("div");
       item.className = "saved-feed-item";
+      if (state.selectedFeedIds.has(feed.id)) {
+        item.classList.add("is-selected");
+      }
+
+      // Checkbox for selection
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.className = "feed-checkbox";
+      checkbox.dataset.action = "toggle-feed-select";
+      checkbox.dataset.feedId = feed.id;
+      checkbox.checked = state.selectedFeedIds.has(feed.id);
 
       const info = document.createElement("div");
       info.className = "feed-info";
@@ -2003,6 +2074,13 @@ function renderExplore() {
         loadBtn.textContent = "Continue";
       }
 
+      const editBtn = document.createElement("button");
+      editBtn.type = "button";
+      editBtn.className = "btn ghost sm";
+      editBtn.dataset.action = "rename-feed";
+      editBtn.dataset.feedId = feed.id;
+      editBtn.textContent = "Edit";
+
       const delBtn = document.createElement("button");
       delBtn.type = "button";
       delBtn.className = "btn ghost sm danger-hover";
@@ -2016,8 +2094,8 @@ function renderExplore() {
         delBtn.title = "Return to main workspace before deleting";
       }
 
-      actions.append(loadBtn, delBtn);
-      item.append(info, actions);
+      actions.append(loadBtn, editBtn, delBtn);
+      item.append(checkbox, info, actions);
       list.append(item);
     }
     feedsCard.append(list);
@@ -2064,63 +2142,7 @@ function renderExplore() {
     tagsCard.append(chipRow);
   }
 
-  const authorsCard = document.createElement("div");
-  authorsCard.className = "card";
-  const authorsTitle = document.createElement("h2");
-  authorsTitle.className = "card-title";
-  authorsTitle.textContent = "Top authors";
-  authorsCard.append(authorsTitle);
-
-  if (topAuthors.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "muted";
-    empty.textContent = "No posts yet.";
-    authorsCard.append(empty);
-  } else {
-    const list = document.createElement("div");
-    list.className = "explore-author-list";
-    for (const entry of topAuthors) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "explore-author";
-      button.dataset.action = "explore-author";
-      button.dataset.handle = entry.handle;
-      const isSelected = selectedAuthor === entry.handle;
-      button.classList.toggle("is-selected", isSelected);
-      button.setAttribute("aria-pressed", String(isSelected));
-
-      const avatar = document.createElement("div");
-      avatar.className = "avatar avatar-sm";
-      avatar.textContent = entry.author?.avatar ?? "??";
-      const accent = entry.author?.accent ?? "var(--brand)";
-      avatar.style.background = `color-mix(in srgb, ${accent} 18%, var(--bg2))`;
-      avatar.style.borderColor = `color-mix(in srgb, ${accent} 26%, var(--border))`;
-      avatar.style.color = "var(--text)";
-
-      const meta = document.createElement("div");
-      meta.className = "explore-author-meta";
-
-      const name = document.createElement("div");
-      name.className = "explore-author-name";
-      name.textContent = entry.author?.name ?? entry.handle;
-
-      const handle = document.createElement("div");
-      handle.className = "explore-author-handle";
-      handle.textContent = `@${entry.handle}`;
-
-      meta.append(name, handle);
-
-      const count = document.createElement("div");
-      count.className = "explore-author-count";
-      count.textContent = `${entry.count}`;
-
-      button.append(avatar, meta, count);
-      list.append(button);
-    }
-    authorsCard.append(list);
-  }
-
-  grid.append(tagsCard, authorsCard);
+  grid.append(tagsCard);
   wrapper.append(grid);
 
   const resultsHeader = document.createElement("div");
@@ -2830,7 +2852,7 @@ async function boot() {
   }
 
   el.feed.addEventListener("click", async (event) => {
-    const button = event.target instanceof Element ? event.target.closest("button[data-action]") : null;
+    const button = event.target instanceof Element ? event.target.closest("[data-action]") : null;
     if (!button) return;
 
     const action = button.dataset.action;
@@ -2865,6 +2887,165 @@ async function boot() {
     if (action === "delete-feed") {
       const feedId = button.dataset.feedId;
       if (feedId) deleteFeed(feedId);
+      return;
+    }
+
+    if (action === "rename-feed") {
+      const feedId = button.dataset.feedId;
+      if (!feedId) return;
+      const feed = state.savedFeeds.find((f) => f.id === feedId);
+      if (!feed) return;
+      const newName = prompt("Enter new feed name:", feed.name);
+      if (newName && newName.trim() !== "") {
+        feed.name = newName.trim();
+        // Also update previewedFeedMeta if this is the active feed
+        if (state.previewedFeedMeta && state.previewedFeedMeta.id === feedId) {
+          state.previewedFeedMeta.name = newName.trim();
+        }
+        persistSavedFeeds();
+        renderExplore();
+        setStatus(`Feed renamed to "${newName.trim()}".`);
+      }
+      return;
+    }
+
+    if (action === "toggle-feed-select") {
+      const feedId = button.dataset.feedId;
+      if (!feedId) return;
+      if (state.selectedFeedIds.has(feedId)) {
+        state.selectedFeedIds.delete(feedId);
+      } else {
+        state.selectedFeedIds.add(feedId);
+      }
+      renderExplore();
+      return;
+    }
+
+    if (action === "select-all-feeds") {
+      if (state.selectedFeedIds.size === state.savedFeeds.length) {
+        // All selected, so deselect all
+        state.selectedFeedIds.clear();
+      } else {
+        // Select all
+        state.selectedFeedIds = new Set(state.savedFeeds.map((f) => f.id));
+      }
+      renderExplore();
+      return;
+    }
+
+    if (action === "clear-feed-selection") {
+      state.selectedFeedIds.clear();
+      renderExplore();
+      return;
+    }
+
+    if (action === "delete-selected-feeds") {
+      const count = state.selectedFeedIds.size;
+      if (count === 0) return;
+      const confirmed = confirm(`Delete ${count} selected feed(s)? This cannot be undone.`);
+      if (!confirmed) return;
+
+      // Check if active feed is in selection
+      if (state.activeFeedId && state.selectedFeedIds.has(state.activeFeedId)) {
+        alert("Cannot delete the currently active feed. Please return to workspace first.");
+        return;
+      }
+
+      state.savedFeeds = state.savedFeeds.filter((f) => !state.selectedFeedIds.has(f.id));
+      state.selectedFeedIds.clear();
+      persistSavedFeeds();
+      renderExplore();
+      setStatus(`Deleted ${count} feed(s).`);
+      return;
+    }
+
+    if (action === "merge-selected-feeds") {
+      if (state.selectedFeedIds.size < 2) return;
+
+      const selectedFeeds = state.savedFeeds.filter((f) => state.selectedFeedIds.has(f.id));
+      const newName = prompt("Enter name for merged feed:", `Merged Feed (${selectedFeeds.length} feeds)`);
+      if (!newName || newName.trim() === "") return;
+
+      // Combine all posts from selected feeds
+      const allCsvPosts = [];
+      const allUserPosts = [];
+      const allLikedIds = new Set();
+      const allCsvFiles = [];
+
+      for (const feed of selectedFeeds) {
+        if (feed.csvPosts) allCsvPosts.push(...feed.csvPosts);
+        if (feed.userPosts) allUserPosts.push(...feed.userPosts);
+        if (feed.likedIds) feed.likedIds.forEach((id) => allLikedIds.add(id));
+        if (feed.csvFiles) allCsvFiles.push(...feed.csvFiles);
+      }
+
+      // Create merged feed
+      const timestamp = Date.now();
+      const random = Math.random().toString(36).substring(2, 9);
+      const mergedFeed = {
+        id: `f_${timestamp}_${random}`,
+        name: newName.trim(),
+        createdAt: timestamp,
+        source: { kind: "merged", name: newName.trim(), files: [] },
+        csvFiles: allCsvFiles,
+        csvPosts: allCsvPosts,
+        csvPostCount: allCsvPosts.length,
+        userPosts: allUserPosts,
+        likedIds: Array.from(allLikedIds),
+      };
+
+      state.savedFeeds.unshift(mergedFeed);
+      state.selectedFeedIds.clear();
+      persistSavedFeeds();
+      renderExplore();
+      setStatus(`Created merged feed "${newName.trim()}" with ${allCsvPosts.length + allUserPosts.length} posts.`);
+      return;
+    }
+
+    if (action === "view-selected-feeds") {
+      if (state.selectedFeedIds.size < 2) return;
+
+      const selectedFeeds = state.savedFeeds.filter((f) => state.selectedFeedIds.has(f.id));
+      const feedNames = selectedFeeds.map((f) => f.name).join(", ");
+
+      // Combine posts from selected feeds only
+      const combinedCsvPosts = [];
+      const combinedUserPosts = [];
+
+      for (const feed of selectedFeeds) {
+        // Handle csvFiles (raw CSV data) - needs to be parsed
+        if (Array.isArray(feed.csvFiles) && feed.csvFiles.length > 0) {
+          const parsedPosts = buildPostsFromFiles(feed.csvFiles);
+          combinedCsvPosts.push(...parsedPosts);
+        }
+        // Handle pre-parsed csvPosts
+        else if (Array.isArray(feed.csvPosts) && feed.csvPosts.length > 0) {
+          combinedCsvPosts.push(...feed.csvPosts);
+        }
+
+        // Handle userPosts
+        if (Array.isArray(feed.userPosts) && feed.userPosts.length > 0) {
+          const userPosts = buildUserPostsFromBackup(feed.userPosts);
+          combinedUserPosts.push(...userPosts);
+        }
+      }
+
+      // Stash current workspace if not already stashed
+      if (!state.stashedWorkspace) {
+        state.stashedWorkspace = captureCurrentFeedSnapshot("Stashed Workspace");
+      }
+
+      // Load combined view
+      state.csvPosts = combinedCsvPosts;
+      state.userPosts = combinedUserPosts;
+      state.source = { kind: "combined", name: `Combined View`, files: [] };
+      state.activeFeedId = null;
+      state.previewedFeedMeta = { id: "combined-view", name: `Combined: ${feedNames}`, createdAt: Date.now() };
+      state.selectedFeedIds.clear();
+
+      setView("home");
+      render();
+      setStatus(`Viewing ${selectedFeeds.length} feeds combined: ${feedNames}`);
       return;
     }
 
