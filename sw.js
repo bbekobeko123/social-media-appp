@@ -1,13 +1,20 @@
-const VERSION = "22";
+const VERSION = "25";
 const CACHE_NAME = `pulse-feed-v${VERSION}`;
 
 const APP_SHELL = [
   "./index.html",
-  `./styles.css?v=${VERSION}`,
+  `./styles-critical.css?v=${VERSION}`,
+  `./styles-deferred.css?v=${VERSION}`,
   `./bootstrap.js?v=${VERSION}`,
   `./app.js?v=${VERSION}`,
+  `./features.js?v=${VERSION}`,
   "./manifest.webmanifest",
   "./icon.svg",
+  "./icon-192.png",
+  "./icon-512.png",
+  "./icon-192-maskable.png",
+  "./icon-512-maskable.png",
+  "./apple-touch-icon.png",
   "./flashcards.csv",
 ];
 

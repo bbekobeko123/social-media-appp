@@ -1,6 +1,8 @@
 const BUNDLED_CSV_PATH = "./flashcards.csv";
 const MAX_CSV_BYTES = 5 * 1024 * 1024;
-const APP_VERSION = "22";
+const APP_VERSION = "25";
+const RENDER_SYNC_LIMIT = 120;
+const RENDER_CHUNK_SIZE = 40;
 
 const STORAGE_KEYS = {
   theme: "pf_theme",
@@ -103,8 +105,77 @@ const VIEW_CONFIG = {
   profile: { title: "Profile", showComposer: false, showClearBookmarks: false, showSearch: false },
 };
 
+let renderRunId = 0;
+let featuresPromise = null;
+
 function setStatus(message) {
   el.status.textContent = message ?? "";
+}
+
+function loadFeatures() {
+  if (!featuresPromise) {
+    const featureContext = {
+      APP_VERSION,
+      MAX_CSV_BYTES,
+      STORAGE_KEYS,
+      state,
+      el,
+      setStatus,
+      render,
+      updateViewUi,
+      applyTheme,
+      getInitialTheme,
+      updateThemeToggle,
+      persistUserPosts,
+      persistLikedIds,
+      persistBookmarkedIds,
+      persistCsvFiles,
+      readStoredCsvFiles,
+      buildPostsFromFiles,
+      buildCsvPosts,
+      loadBundledCsvText,
+      detectDelimiter,
+      parseCsv,
+      createPostFromRow,
+      analyzeCsv,
+      formatBytes,
+      mergePosts,
+      shuffleArray,
+      retriggerAnimation,
+      buildUserPostsFromBackup,
+      safeRemoveItem,
+      cssTimeToMs,
+    };
+    featuresPromise = import("./features.js").then((mod) => mod.initFeatures(featureContext));
+  }
+  return featuresPromise;
+}
+
+function enableDeferredStyles() {
+  const links = document.querySelectorAll("link[data-defer-css]");
+  links.forEach((link) => {
+    link.media = "all";
+  });
+}
+
+function scheduleDeferredStyles() {
+  const activate = () => enableDeferredStyles();
+  if ("requestIdleCallback" in window) {
+    window.requestIdleCallback(activate, { timeout: 2000 });
+  } else {
+    window.addEventListener("load", activate, { once: true });
+  }
+}
+
+function scheduleFeaturePreload() {
+  const preload = () => {
+    loadFeatures().catch(() => {});
+  };
+  if ("requestIdleCallback" in window) {
+    window.requestIdleCallback(preload, { timeout: 3000 });
+  } else {
+    window.addEventListener("load", preload, { once: true });
+  }
 }
 
 const animationTimeouts = new WeakMap();
@@ -307,103 +378,9 @@ function formatBytes(bytes) {
   return `${scaled.toFixed(decimals)} ${units[unitIndex]}`;
 }
 
-function getCsvByteSize(file, text) {
-  if (file && typeof file.size === "number" && file.size >= 0) return file.size;
-  try {
-    return new Blob([text ?? ""]).size;
-  } catch {
-    return typeof text === "string" ? text.length : null;
-  }
-}
-
-function formatCsvSummary(analysis, byteSize) {
-  const parts = [];
-  if (analysis) {
-    parts.push(
-      `Detected ${analysis.postCount} post${analysis.postCount === 1 ? "" : "s"} from ${analysis.rowCount} row${analysis.rowCount === 1 ? "" : "s"} (${analysis.delimiter} delimiter)`,
-    );
-    if (analysis.malformedRows > 0) {
-      parts.push(`ignored ${analysis.malformedRows} malformed row${analysis.malformedRows === 1 ? "" : "s"}`);
-    }
-  }
-  const sizeLabel = formatBytes(byteSize);
-  if (sizeLabel) parts.push(`size ${sizeLabel}`);
-  return parts.join("; ");
-}
-
-function downloadBlob(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.append(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-
-function buildLocalBackup() {
-  return {
-    version: APP_VERSION,
-    exportedAt: new Date().toISOString(),
-    userPosts: state.userPosts.map((p) => ({ idSeed: `user|${p.createdAt}|${p.text}`, createdAt: p.createdAt, text: p.text })),
-    likes: Array.from(state.likedIds),
-    bookmarks: Array.from(state.bookmarkedIds),
-    csv: { source: state.source, files: readStoredCsvFiles() },
-  };
-}
-
-function exportLocalData() {
-  const json = JSON.stringify(buildLocalBackup(), null, 2);
-  const blob = new Blob([json], { type: "application/json" });
-  downloadBlob(blob, `pulse-feed-backup-v${APP_VERSION}.json`);
-  setStatus("Downloaded local backup.");
-}
-
-function normalizeBackupPayload(raw) {
-  if (!raw || typeof raw !== "object") return null;
-  if (typeof raw.version !== "string") return null;
-
-  const likesRaw = Array.isArray(raw.likes) ? raw.likes : Array.isArray(raw.likedIds) ? raw.likedIds : [];
-  const bookmarksRaw = Array.isArray(raw.bookmarks) ? raw.bookmarks : Array.isArray(raw.bookmarkedIds) ? raw.bookmarkedIds : [];
-
-  const csvRaw = raw.csv && typeof raw.csv === "object" ? raw.csv : null;
-  const csvFilesRaw = Array.isArray(csvRaw?.files) ? csvRaw.files : Array.isArray(raw.csvFiles) ? raw.csvFiles : [];
-
-  const userPostsRaw = Array.isArray(raw.userPosts) ? raw.userPosts : [];
-
-  return {
-    version: raw.version,
-    likes: likesRaw.filter((id) => typeof id === "string"),
-    bookmarks: bookmarksRaw.filter((id) => typeof id === "string"),
-    csvFiles: csvFilesRaw
-      .map((file) => {
-        if (!file || typeof file !== "object") return null;
-        const name = typeof file.name === "string" ? file.name : null;
-        const text = typeof file.text === "string" ? file.text : null;
-        if (!name || !text) return null;
-        return { name, text };
-      })
-      .filter(Boolean),
-    userPosts: userPostsRaw
-      .map((post) => {
-        if (typeof post === "string") {
-          const text = post.trim();
-          if (!text) return null;
-          const createdAt = Date.now();
-          return { idSeed: `user|${createdAt}|${text}`, createdAt, text };
-        }
-        if (!post || typeof post !== "object") return null;
-        const text = typeof post.text === "string" ? post.text.trim() : "";
-        if (!text) return null;
-        const createdAt = Number(post.createdAt);
-        const safeCreatedAt = Number.isFinite(createdAt) ? createdAt : Date.now();
-        const idSeed =
-          typeof post.idSeed === "string" ? post.idSeed : `user|${safeCreatedAt}|${typeof post.text === "string" ? post.text : text}`;
-        return { idSeed, createdAt: safeCreatedAt, text };
-      })
-      .filter(Boolean),
-  };
+async function exportLocalData() {
+  const features = await loadFeatures();
+  return features.exportLocalData();
 }
 
 function buildUserPostsFromBackup(posts) {
@@ -422,76 +399,9 @@ function buildUserPostsFromBackup(posts) {
     .filter(Boolean);
 }
 
-async function importLocalDataFile(file) {
-  if (!file) return;
-  let parsed;
-  try {
-    parsed = JSON.parse(await file.text());
-  } catch {
-    setStatus("Couldn't read that backup file.");
-    return;
-  }
-
-  const normalized = normalizeBackupPayload(parsed);
-  if (!normalized) {
-    setStatus("Backup file format not recognized.");
-    return;
-  }
-
-  safeRemoveItem(STORAGE_KEYS.userPosts);
-  safeRemoveItem(STORAGE_KEYS.likedIds);
-  safeRemoveItem(STORAGE_KEYS.bookmarkedIds);
-  safeRemoveItem(STORAGE_KEYS.csvFiles);
-  safeRemoveItem(STORAGE_KEYS.csvText);
-  safeRemoveItem(STORAGE_KEYS.csvName);
-
-  state.userPosts = buildUserPostsFromBackup(normalized.userPosts);
-  state.likedIds = new Set(normalized.likes);
-  state.bookmarkedIds = new Set(normalized.bookmarks);
-  state.expandedReplies.clear();
-
-  persistUserPosts();
-  persistLikedIds();
-  persistBookmarkedIds();
-
-  if (normalized.csvFiles.length > 0) {
-    persistCsvFiles(normalized.csvFiles);
-    state.source = {
-      kind: "uploaded",
-      name: normalized.csvFiles[0].name,
-      files: normalized.csvFiles.map((f) => f.name),
-    };
-    state.csvPosts = buildPostsFromFiles(normalized.csvFiles);
-  } else {
-    state.source = { kind: "bundled", name: "flashcards.csv", files: ["flashcards.csv"] };
-    const csvText = await loadBundledCsvText();
-    state.csvPosts = buildCsvPosts(csvText, "flashcards.csv");
-  }
-
-  state.shuffleOrder = null;
-  state.lastUploadSnapshot = null;
-  pendingCsvFile = null;
-  state.query = "";
-  el.search.value = "";
-  updateViewUi();
-  render();
-
-  const versionNote = normalized.version && normalized.version !== APP_VERSION ? ` (from v${normalized.version})` : "";
-  setStatus(`Imported local backup${versionNote}.`);
-}
-
-function promptImportLocalData() {
-  const input = document.createElement("input");
-  input.type = "file";
-  input.accept = "application/json";
-  input.className = "sr-only";
-  document.body.append(input);
-  input.addEventListener("change", async () => {
-    const file = input.files?.[0];
-    input.remove();
-    await importLocalDataFile(file);
-  });
-  input.click();
+async function promptImportLocalData() {
+  const features = await loadFeatures();
+  return features.promptImportLocalData();
 }
 
 async function initStorageInfo() {
@@ -691,14 +601,30 @@ function pickAuthor(index) {
   return AUTHORS[index % AUTHORS.length];
 }
 
+function buildSearchText(text, replyText) {
+  const safeText = String(text ?? "").trim();
+  const safeReply = String(replyText ?? "").trim();
+  return `${safeText}\n${safeReply}`.toLowerCase();
+}
+
+function getSearchText(post) {
+  if (post && typeof post.searchText === "string") return post.searchText;
+  const searchText = buildSearchText(post?.text, post?.replyText);
+  if (post && typeof post === "object") post.searchText = searchText;
+  return searchText;
+}
+
 function createPost({ idSeed, author, createdAt, text, replyText }) {
   const id = `p_${fnv1a(idSeed)}`;
+  const safeText = String(text ?? "").trim();
+  const safeReply = String(replyText ?? "").trim();
   return {
     id,
     author,
     createdAt,
-    text: String(text ?? "").trim(),
-    replyText: String(replyText ?? "").trim(),
+    text: safeText,
+    replyText: safeReply,
+    searchText: buildSearchText(safeText, safeReply),
   };
 }
 
@@ -1161,24 +1087,34 @@ function scheduleThemeTransitionCleanup(token) {
   window.setTimeout(() => endThemeTransition(token), 2000);
 }
 
+function getSystemTheme() {
+  return window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
+}
+
+function getCurrentTheme() {
+  const stored = document.documentElement.dataset.theme;
+  if (stored === "dark" || stored === "light") return stored;
+  return getSystemTheme();
+}
+
 function applyTheme(theme) {
   const root = document.documentElement;
-  if (theme === "dark") root.dataset.theme = "dark";
+  if (theme === "dark" || theme === "light") root.dataset.theme = theme;
   else delete root.dataset.theme;
 
+  const effective = theme === "dark" || theme === "light" ? theme : getSystemTheme();
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute("content", theme === "dark" ? "#0f1419" : "#ffffff");
+  if (meta) meta.setAttribute("content", effective === "dark" ? "#0f1419" : "#ffffff");
 }
 
 function getInitialTheme() {
   const stored = safeGetItem(STORAGE_KEYS.theme);
   if (stored === "dark" || stored === "light") return stored;
-  return window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
+  return null;
 }
 
 function updateThemeToggle() {
-  const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
-  const isDark = current === "dark";
+  const isDark = getCurrentTheme() === "dark";
   if (el.themeToggle) el.themeToggle.textContent = isDark ? "Light mode" : "Dark mode";
 
   const profileSwitch = document.getElementById("profileThemeSwitch");
@@ -1190,7 +1126,7 @@ function updateThemeToggle() {
 }
 
 function toggleTheme() {
-  const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  const current = getCurrentTheme();
   const next = current === "dark" ? "light" : "dark";
   safeSetItem(STORAGE_KEYS.theme, next);
 
@@ -1279,14 +1215,6 @@ function getPostsInOrder() {
     const bi = orderMap.has(b.id) ? orderMap.get(b.id) : Number.MAX_SAFE_INTEGER;
     return ai - bi;
   });
-}
-
-function captureUploadSnapshot() {
-  state.lastUploadSnapshot = {
-    files: readStoredCsvFiles(),
-    source: { ...state.source },
-    csvPosts: [...state.csvPosts],
-  };
 }
 
 function getLikeCount(postId) {
@@ -1404,7 +1332,6 @@ function createPostElement(post) {
   likeBtn.dataset.postId = post.id;
   likeBtn.classList.toggle("is-liked", liked);
   likeBtn.setAttribute("aria-pressed", String(liked));
-  likeBtn.setAttribute("aria-label", liked ? "Unlike" : "Like");
   likeBtn.innerHTML = `
     <span class="icon" aria-hidden="true">
       <svg viewBox="0 0 24 24">
@@ -1422,7 +1349,6 @@ function createPostElement(post) {
   replyBtn.dataset.postId = post.id;
   replyBtn.disabled = replyCount === 0;
   replyBtn.setAttribute("aria-expanded", String(replyExpanded));
-  replyBtn.setAttribute("aria-label", replyCount === 0 ? "No replies" : replyExpanded ? "Hide reply" : "View reply");
   replyBtn.innerHTML = `
     <span class="icon" aria-hidden="true">
       <svg viewBox="0 0 24 24">
@@ -1440,7 +1366,6 @@ function createPostElement(post) {
   bookmarkBtn.dataset.postId = post.id;
   bookmarkBtn.classList.toggle("is-bookmarked", bookmarked);
   bookmarkBtn.setAttribute("aria-pressed", String(bookmarked));
-  bookmarkBtn.setAttribute("aria-label", bookmarked ? "Remove bookmark" : "Bookmark");
   bookmarkBtn.innerHTML = `
     <span class="icon" aria-hidden="true">
       <svg viewBox="0 0 24 24">
@@ -1568,155 +1493,39 @@ function isModalVisible(modal) {
   return modal?.classList.contains("is-visible");
 }
 
-function openFeedManager() {
-  renderFeedManagerList();
-  if (!el.feedManagerModal) return;
-  el.feedManagerModal.hidden = false;
-  requestAnimationFrame(() => el.feedManagerModal.classList.add("is-visible"));
+async function openFeedManager() {
+  const features = await loadFeatures();
+  return features.openFeedManager();
 }
 
-function closeFeedManager() {
-  if (!el.feedManagerModal) return;
-  const modal = el.feedManagerModal;
-  modal.classList.remove("is-visible");
-  const finish = () => {
-    modal.hidden = true;
-    modal.removeEventListener("transitionend", onTransitionEnd);
-  };
-  const onTransitionEnd = (event) => {
-    if (event.target !== modal) return;
-    if (event.propertyName !== "opacity") return;
-    finish();
-  };
-  modal.addEventListener("transitionend", onTransitionEnd);
-  window.setTimeout(finish, 250);
+async function closeFeedManager() {
+  const features = await loadFeatures();
+  return features.closeFeedManager();
 }
 
-function openClearFeedModal() {
-  if (!el.clearFeedModal) return;
-  el.clearFeedModal.hidden = false;
-  requestAnimationFrame(() => el.clearFeedModal.classList.add("is-visible"));
-  if (el.clearFeedCancel instanceof HTMLElement) el.clearFeedCancel.focus();
+async function openClearFeedModal() {
+  const features = await loadFeatures();
+  return features.openClearFeedModal();
 }
 
-function closeClearFeedModal() {
-  if (!el.clearFeedModal) return;
-  const modal = el.clearFeedModal;
-  modal.classList.remove("is-visible");
-
-  const finish = () => {
-    modal.hidden = true;
-    modal.removeEventListener("transitionend", onTransitionEnd);
-  };
-
-  const onTransitionEnd = (event) => {
-    if (event.target !== modal) return;
-    if (event.propertyName !== "opacity") return;
-    finish();
-  };
-
-  modal.addEventListener("transitionend", onTransitionEnd);
-  window.setTimeout(finish, 250);
+async function closeClearFeedModal() {
+  const features = await loadFeatures();
+  return features.closeClearFeedModal();
 }
 
-function openResetDataModal() {
-  if (!el.resetDataModal) return;
-  el.resetDataModal.hidden = false;
-  requestAnimationFrame(() => el.resetDataModal.classList.add("is-visible"));
-  if (el.resetDataCancel instanceof HTMLElement) el.resetDataCancel.focus();
+async function openResetDataModal() {
+  const features = await loadFeatures();
+  return features.openResetDataModal();
 }
 
-function closeResetDataModal() {
-  if (!el.resetDataModal) return;
-  const modal = el.resetDataModal;
-  modal.classList.remove("is-visible");
-
-  const finish = () => {
-    modal.hidden = true;
-    modal.removeEventListener("transitionend", onTransitionEnd);
-  };
-
-  const onTransitionEnd = (event) => {
-    if (event.target !== modal) return;
-    if (event.propertyName !== "opacity") return;
-    finish();
-  };
-
-  modal.addEventListener("transitionend", onTransitionEnd);
-  window.setTimeout(finish, 250);
-}
-
-function renderFeedManagerList() {
-  const list = el.feedFileList;
-  if (!list) return;
-  list.replaceChildren();
-  const files = readStoredCsvFiles();
-  if (files.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "status";
-    empty.textContent = "No uploaded CSV files. Upload to add posts.";
-    list.append(empty);
-    return;
-  }
-
-  files.forEach((file, index) => {
-    const item = document.createElement("div");
-    item.className = "file-item";
-
-    const meta = document.createElement("div");
-    meta.className = "file-meta";
-
-    const name = document.createElement("div");
-    name.className = "file-name";
-    name.textContent = file.name;
-
-    const delimiter = detectDelimiter(file.text);
-    const postCount = parseCsv(file.text, delimiter)
-      .map((row, i) => createPostFromRow(row, i, file.name))
-      .filter(Boolean).length;
-
-    const count = document.createElement("div");
-    count.className = "file-count";
-    count.textContent = `${postCount} post${postCount === 1 ? "" : "s"}`;
-
-    meta.append(name, count);
-
-    const removeBtn = document.createElement("button");
-    removeBtn.type = "button";
-    removeBtn.className = "btn ghost";
-    removeBtn.dataset.index = String(index);
-    removeBtn.textContent = "Remove";
-
-    item.append(meta, removeBtn);
-    list.append(item);
-  });
+async function closeResetDataModal() {
+  const features = await loadFeatures();
+  return features.closeResetDataModal();
 }
 
 async function removeCsvFileByIndex(index) {
-  const files = readStoredCsvFiles();
-  if (index < 0 || index >= files.length) return;
-  files.splice(index, 1);
-
-  if (files.length === 0) {
-    safeRemoveItem(STORAGE_KEYS.csvFiles);
-    safeRemoveItem(STORAGE_KEYS.csvText);
-    safeRemoveItem(STORAGE_KEYS.csvName);
-    state.source = { kind: "bundled", name: "flashcards.csv", files: ["flashcards.csv"] };
-    const csvText = await loadBundledCsvText();
-    state.csvPosts = buildCsvPosts(csvText, "flashcards.csv");
-    setStatus("Removed CSV. Reverted to bundled feed.");
-  } else {
-    persistCsvFiles(files);
-    state.source = { kind: "uploaded", name: files[0].name, files: files.map((f) => f.name) };
-    state.csvPosts = buildPostsFromFiles(files);
-    setStatus("Removed CSV from feed.");
-  }
-
-  state.shuffleOrder = null;
-  state.query = "";
-  el.search.value = "";
-  render();
-  renderFeedManagerList();
+  const features = await loadFeatures();
+  return features.removeCsvFileByIndex(index);
 }
 
 function setView(view) {
@@ -1727,14 +1536,60 @@ function setView(view) {
   render();
 }
 
+function beginRender() {
+  renderRunId += 1;
+  return renderRunId;
+}
+
+function renderPostList(container, posts, renderId, { onComplete } = {}) {
+  if (!(container instanceof HTMLElement)) return;
+  container.replaceChildren();
+
+  if (!Array.isArray(posts) || posts.length === 0) {
+    if (typeof onComplete === "function") onComplete();
+    return;
+  }
+
+  if (posts.length <= RENDER_SYNC_LIMIT) {
+    const frag = document.createDocumentFragment();
+    for (const post of posts) frag.append(createPostElement(post));
+    container.append(frag);
+    if (typeof onComplete === "function") onComplete();
+    return;
+  }
+
+  let index = 0;
+  const chunkSize = Math.max(20, Math.min(RENDER_CHUNK_SIZE, Math.ceil(posts.length / 20)));
+  const schedule =
+    typeof window.requestAnimationFrame === "function"
+      ? window.requestAnimationFrame
+      : (callback) => window.setTimeout(callback, 16);
+
+  const appendChunk = () => {
+    if (renderId !== renderRunId) return;
+    const frag = document.createDocumentFragment();
+    const end = Math.min(posts.length, index + chunkSize);
+    for (; index < end; index += 1) frag.append(createPostElement(posts[index]));
+    container.append(frag);
+    if (index < posts.length) {
+      schedule(appendChunk);
+    } else if (typeof onComplete === "function") {
+      onComplete();
+    }
+  };
+
+  schedule(appendChunk);
+}
+
 function render() {
+  const renderId = beginRender();
   if (state.view === "profile") {
-    renderProfile();
+    renderProfile(renderId);
     return;
   }
 
   if (state.view === "explore") {
-    renderExplore();
+    renderExplore(renderId);
     return;
   }
 
@@ -1758,15 +1613,10 @@ function render() {
 
   const q = String(state.query ?? "").trim().toLowerCase();
   const visible = q
-    ? orderedFiltered.filter((p) => {
-      const haystack = `${p.text}\n${p.replyText}`.toLowerCase();
-      return haystack.includes(q);
-    })
+    ? orderedFiltered.filter((p) => getSearchText(p).includes(q))
     : orderedFiltered;
 
-  const frag = document.createDocumentFragment();
-  for (const post of visible) frag.append(createPostElement(post));
-
+  const justAddedId = state.justAddedPostId;
   if (visible.length === 0) {
     const empty = document.createElement("div");
     empty.className = "status";
@@ -1775,13 +1625,19 @@ function render() {
     } else {
       empty.textContent = q ? "No posts match your search." : "No posts to show.";
     }
-    frag.append(empty);
+    el.feed.replaceChildren(empty);
+    state.justAddedPostId = null;
+  } else {
+    renderPostList(el.feed, visible, renderId, {
+      onComplete: () => {
+        if (justAddedId) {
+          const target = document.getElementById(justAddedId);
+          if (target) retriggerAnimation(target, "is-entering");
+        }
+        state.justAddedPostId = null;
+      },
+    });
   }
-
-  const justAddedId = state.justAddedPostId;
-  el.feed.replaceChildren(frag);
-  if (justAddedId) retriggerAnimation(document.getElementById(justAddedId), "is-entering");
-  state.justAddedPostId = null;
 
   const sourceLabel = getSourceLabel();
 
@@ -1804,8 +1660,9 @@ function render() {
   if (el.clearBookmarks) el.clearBookmarks.disabled = state.bookmarkedIds.size === 0;
 }
 
-function renderProfile() {
-  const isDark = document.documentElement.dataset.theme === "dark";
+function renderProfile(renderId) {
+  if (typeof renderId !== "number") beginRender();
+  const isDark = getCurrentTheme() === "dark";
 
   const wrapper = document.createElement("div");
   wrapper.className = "profile";
@@ -1922,7 +1779,8 @@ function renderProfile() {
   setStatus("");
 }
 
-function renderExplore() {
+function renderExplore(renderId) {
+  if (typeof renderId !== "number") renderId = beginRender();
   const ordered = [...mergePosts()].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
   const selectedTag = state.explore?.selectedTag || null;
   const selectedAuthor = state.explore?.selectedAuthor || null;
@@ -2178,9 +2036,11 @@ function renderExplore() {
   if (q) {
     visible = visible.filter((p) => {
       const tags = getTagsForPost(p);
-      const haystack = `${p.text}\n${p.replyText}\n${p.author?.name ?? ""}\n@${p.author?.handle ?? ""}\n${tags.join(
-        " ",
-      )}\n#${tags.join(" #")}`.toLowerCase();
+      const authorName = String(p?.author?.name ?? "").toLowerCase();
+      const authorHandle = `@${String(p?.author?.handle ?? "").toLowerCase()}`;
+      const tagText = tags.join(" ");
+      const tagHash = tags.length > 0 ? `#${tags.join(" #")}` : "";
+      const haystack = `${getSearchText(p)}\n${authorName}\n${authorHandle}\n${tagText}\n${tagHash}`;
       return haystack.includes(q);
     });
   }
@@ -2195,27 +2055,25 @@ function renderExplore() {
     visible = [...visible].sort((a, b) => score(b) - score(a) || (b.createdAt ?? 0) - (a.createdAt ?? 0));
   }
 
+  wrapper.append(results);
+  el.feed.replaceChildren(wrapper);
+
   if (tokens.length === 0) {
     const hint = document.createElement("div");
     hint.className = "status";
     hint.textContent = "Try searching or pick a tag.";
     results.append(hint);
     setStatus(`Explore ready. Source: ${getSourceLabel()}.`);
+  } else if (visible.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "status";
+    empty.textContent = "No results match your filters.";
+    results.append(empty);
+    setStatus(`Showing 0 results. Source: ${getSourceLabel()}.`);
   } else {
-    const frag = document.createDocumentFragment();
-    for (const post of visible) frag.append(createPostElement(post));
-    if (visible.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "status";
-      empty.textContent = "No results match your filters.";
-      frag.append(empty);
-    }
-    results.append(frag);
+    renderPostList(results, visible, renderId);
     setStatus(`Showing ${visible.length} result${visible.length === 1 ? "" : "s"}. Source: ${getSourceLabel()}.`);
   }
-
-  wrapper.append(results);
-  el.feed.replaceChildren(wrapper);
 }
 
 async function loadBundledCsvText() {
@@ -2258,36 +2116,6 @@ async function loadInitialCsv() {
   state.csvPosts = buildCsvPosts(csvText, "flashcards.csv");
 }
 
-async function setUploadedCsv(csvText, fileName) {
-  const safeName = String(fileName || "uploaded.csv");
-  captureUploadSnapshot();
-  persistCsvFiles([{ name: safeName, text: csvText }]);
-  state.source = { kind: "uploaded", name: safeName, files: [safeName] };
-  state.csvPosts = buildCsvPosts(csvText, safeName);
-  state.shuffleOrder = null;
-  state.query = "";
-  el.search.value = "";
-  updateViewUi();
-  render();
-}
-
-async function appendUploadedCsv(csvText, fileName) {
-  const safeName = String(fileName || "uploaded.csv");
-  const nextPosts = buildCsvPosts(csvText, safeName);
-  state.csvPosts = [...nextPosts, ...state.csvPosts];
-  const stored = readStoredCsvFiles();
-  captureUploadSnapshot();
-  const filesList = [{ name: safeName, text: csvText }, ...stored];
-  persistCsvFiles(filesList);
-  const files = filesList.map((f) => f.name);
-  state.source = { kind: "uploaded", name: safeName, files };
-  state.shuffleOrder = null;
-  state.query = "";
-  el.search.value = "";
-  updateViewUi();
-  render();
-}
-
 function updateComposerUi() {
   const text = String(el.composerText.value ?? "");
   el.charLeft.textContent = String(280 - text.length);
@@ -2307,245 +2135,71 @@ function addUserPost(text) {
 }
 
 async function handleCsvFile(file) {
-  if (!file) return;
-  if (typeof file.size === "number" && file.size > MAX_CSV_BYTES) {
-    setStatus("CSV is too large. Max size is 5MB.");
-    return;
-  }
-
-  const fileName = String(file.name || "");
-  const lowerName = fileName.toLowerCase();
-  const fileType = String(file.type || "").toLowerCase();
-  const isCsvType = fileType.includes("csv") || fileType.startsWith("text/");
-  const isCsvName = lowerName.endsWith(".csv");
-  if (!isCsvType && !isCsvName) {
-    setStatus("Unsupported file type. Please choose a .csv file.");
-    return;
-  }
-  const text = await file.text();
-  const analysis = analyzeCsv(text, fileName);
-  const byteSize = getCsvByteSize(file, text);
-  const summary = formatCsvSummary(analysis, byteSize);
-  const existingFiles = readStoredCsvFiles();
-  const isFirstUpload = existingFiles.length === 0 && state.source.kind === "bundled";
-  if (isFirstUpload) {
-    await setUploadedCsv(text, fileName);
-    pendingCsvFile = null;
-    const statusParts = [`Feed replaced with ${fileName}.`];
-    if (summary) statusParts.push(summary);
-    setStatus(statusParts.join(" "));
-    return;
-  }
-
-  pendingCsvFile = { file, text, analysis, byteSize };
-  const hasMetaSlot = Boolean(el.csvChoiceMeta);
-  const meta = hasMetaSlot ? summary || "" : "";
-  const message = hasMetaSlot ? `Load "${fileName}"?` : summary ? `Load "${fileName}"? ${summary}.` : `Load "${fileName}"?`;
-  openCsvChoiceModal(fileName, { message, meta });
+  const features = await loadFeatures();
+  return features.handleCsvFile(file);
 }
 
-function requestClearFeed() {
-  openClearFeedModal();
+async function handleCsvChoiceReplace() {
+  const features = await loadFeatures();
+  return features.handleCsvChoiceReplace();
+}
+
+async function handleCsvChoiceAppend() {
+  const features = await loadFeatures();
+  return features.handleCsvChoiceAppend();
+}
+
+async function handleShareAction(button, postId) {
+  const features = await loadFeatures();
+  return features.handleShare(button, postId);
+}
+
+async function requestClearFeed() {
+  const features = await loadFeatures();
+  return features.requestClearFeed();
 }
 
 async function clearFeedConfirmed() {
-  state.userPosts = [];
-  state.likedIds.clear();
-  state.bookmarkedIds.clear();
-  state.expandedReplies.clear();
-  state.shuffleOrder = null;
-  state.lastUploadSnapshot = null;
-  persistUserPosts();
-  persistLikedIds();
-  persistBookmarkedIds();
-  safeRemoveItem(STORAGE_KEYS.csvFiles);
-  safeRemoveItem(STORAGE_KEYS.csvText);
-  safeRemoveItem(STORAGE_KEYS.csvName);
-  state.source = { kind: "bundled", name: "flashcards.csv", files: ["flashcards.csv"] };
-  const csvText = await loadBundledCsvText();
-  state.csvPosts = buildCsvPosts(csvText, "flashcards.csv");
-  state.query = "";
-  el.search.value = "";
-  updateViewUi();
-  render();
-  setStatus("Feed reset to bundled CSV.");
-}
-
-function clearAllAppStorageKeys() {
-  for (const key of Object.values(STORAGE_KEYS)) safeRemoveItem(key);
+  const features = await loadFeatures();
+  return features.clearFeedConfirmed();
 }
 
 async function resetLocalDataConfirmed() {
-  clearAllAppStorageKeys();
-
-  state.userPosts = [];
-  state.likedIds.clear();
-  state.bookmarkedIds.clear();
-  state.expandedReplies.clear();
-  state.shuffleOrder = null;
-  state.lastUploadSnapshot = null;
-  pendingCsvFile = null;
-
-  state.source = { kind: "bundled", name: "flashcards.csv", files: ["flashcards.csv"] };
-  const csvText = await loadBundledCsvText();
-  state.csvPosts = buildCsvPosts(csvText, "flashcards.csv");
-
-  applyTheme(getInitialTheme());
-  updateThemeToggle();
-
-  state.query = "";
-  el.search.value = "";
-  updateViewUi();
-  render();
-  setStatus("Local data reset.");
+  const features = await loadFeatures();
+  return features.resetLocalDataConfirmed();
 }
 
-function shuffleFeed() {
-  const ids = mergePosts().map((p) => p.id);
-  state.shuffleOrder = shuffleArray(ids);
-  render();
-  setStatus("Feed shuffled.");
+async function shuffleFeed() {
+  const features = await loadFeatures();
+  return features.shuffleFeed();
 }
 
 async function undoLastUpload() {
-  const snapshot = state.lastUploadSnapshot;
-  if (!snapshot) return;
-  if (snapshot.files && snapshot.files.length > 0) {
-    persistCsvFiles(snapshot.files);
-    state.source = snapshot.source;
-    state.csvPosts = buildPostsFromFiles(snapshot.files);
-  } else {
-    safeRemoveItem(STORAGE_KEYS.csvFiles);
-    safeRemoveItem(STORAGE_KEYS.csvText);
-    safeRemoveItem(STORAGE_KEYS.csvName);
-    const csvText = await loadBundledCsvText();
-    state.source = { kind: "bundled", name: "flashcards.csv", files: ["flashcards.csv"] };
-    state.csvPosts = buildCsvPosts(csvText, "flashcards.csv");
-  }
-  state.shuffleOrder = null;
-  state.lastUploadSnapshot = null;
-  state.query = "";
-  el.search.value = "";
-  updateViewUi();
-  render();
-  setStatus("Undo applied.");
+  const features = await loadFeatures();
+  return features.undoLastUpload();
 }
 
-function downloadCurrentFeed() {
-  const rows = mergePosts().map((p) => [p.text, p.replyText]);
-  const sanitizeCsvCell = (cell) => {
-    const str = String(cell ?? "");
-    const trimmedStart = str.trimStart();
-    if (
-      trimmedStart.startsWith("=") ||
-      trimmedStart.startsWith("+") ||
-      trimmedStart.startsWith("-") ||
-      trimmedStart.startsWith("@")
-    ) {
-      return `'${str}`;
-    }
-    return str;
-  };
-  const escape = (cell) => {
-    const str = sanitizeCsvCell(cell);
-    if (str.includes('"') || str.includes(",") || str.includes("\n")) return `"${str.replace(/"/g, '""')}"`;
-    return str;
-  };
-  const csv = rows.map((r) => r.map(escape).join(",")).join("\n");
-  const blob = new Blob([csv], { type: "text/csv" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = "feed.csv";
-  document.body.append(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-  setStatus("Downloaded feed.");
+async function downloadCurrentFeed() {
+  const features = await loadFeatures();
+  return features.downloadCurrentFeed();
 }
 
-let dropOverlayToken = 0;
-let dropOverlayHideTimeoutId = 0;
-let pendingCsvFile = null;
 let lastScrollY = 0;
 let scrollHideTicking = false;
 
-function openCsvChoiceModal(fileName, { message, meta } = {}) {
-  if (!el.csvChoiceModal) return;
-  const safeName = String(fileName ?? "");
-  if (el.csvChoiceMessage) el.csvChoiceMessage.textContent = message ?? `Load "${safeName}"?`;
-  if (el.csvChoiceMeta) el.csvChoiceMeta.textContent = meta ?? "";
-  el.csvChoiceModal.hidden = false;
-  requestAnimationFrame(() => el.csvChoiceModal.classList.add("is-visible"));
+async function openCsvChoiceModal(fileName, options) {
+  const features = await loadFeatures();
+  return features.openCsvChoiceModal(fileName, options);
 }
 
-function closeCsvChoiceModal() {
-  if (!el.csvChoiceModal) return;
-  const modal = el.csvChoiceModal;
-  modal.classList.remove("is-visible");
-  pendingCsvFile = null;
-
-  const finish = () => {
-    modal.hidden = true;
-    modal.removeEventListener("transitionend", onTransitionEnd);
-    if (el.csvChoiceMeta) el.csvChoiceMeta.textContent = "";
-  };
-
-  const onTransitionEnd = (event) => {
-    if (event.target !== modal) return;
-    if (event.propertyName !== "opacity") return;
-    finish();
-  };
-
-  modal.addEventListener("transitionend", onTransitionEnd);
-  window.setTimeout(finish, 250);
+async function closeCsvChoiceModal() {
+  const features = await loadFeatures();
+  return features.closeCsvChoiceModal();
 }
 
-function showDropOverlay(show) {
-  if (!el.dropOverlay) return;
-  const overlay = el.dropOverlay;
-
-  dropOverlayToken += 1;
-  const token = dropOverlayToken;
-
-  if (dropOverlayHideTimeoutId) {
-    window.clearTimeout(dropOverlayHideTimeoutId);
-    dropOverlayHideTimeoutId = 0;
-  }
-
-  if (show) {
-    overlay.hidden = false;
-    overlay.classList.remove("is-visible");
-    requestAnimationFrame(() => {
-      if (dropOverlayToken !== token) return;
-      overlay.classList.add("is-visible");
-    });
-    return;
-  }
-
-  overlay.classList.remove("is-visible");
-  if (overlay.hidden) return;
-
-  const finish = () => {
-    if (dropOverlayToken !== token) return;
-    overlay.hidden = true;
-    dropOverlayHideTimeoutId = 0;
-  };
-
-  const onTransitionEnd = (event) => {
-    if (event.target !== overlay) return;
-    if (event.propertyName !== "opacity") return;
-    overlay.removeEventListener("transitionend", onTransitionEnd);
-    finish();
-  };
-
-  overlay.addEventListener("transitionend", onTransitionEnd);
-  const styles = window.getComputedStyle(overlay);
-  const totalMs = cssTimeToMs(styles.transitionDuration) + cssTimeToMs(styles.transitionDelay);
-  dropOverlayHideTimeoutId = window.setTimeout(() => {
-    overlay.removeEventListener("transitionend", onTransitionEnd);
-    finish();
-  }, Math.max(250, totalMs + 50));
+async function showDropOverlay(show) {
+  const features = await loadFeatures();
+  return features.showDropOverlay(show);
 }
 
 async function boot() {
@@ -2571,6 +2225,8 @@ async function boot() {
   render();
   updateComposerUi();
   initStorageInfo();
+  scheduleDeferredStyles();
+  scheduleFeaturePreload();
 
   for (const item of el.navItems) {
     item.addEventListener("click", () => {
@@ -2650,37 +2306,9 @@ async function boot() {
     });
   }
 
-  if (el.csvChoiceReplace) {
-    el.csvChoiceReplace.addEventListener("click", async () => {
-      if (!pendingCsvFile) return;
-      const current = pendingCsvFile;
-      const text = current.text || (await current.file?.text?.());
-      await setUploadedCsv(text, current.file?.name || "uploaded.csv");
-      closeCsvChoiceModal();
-      pendingCsvFile = null;
-      const summary = formatCsvSummary(current.analysis, current.byteSize ?? getCsvByteSize(current.file, text));
-      const statusParts = ["Feed replaced with uploaded CSV."];
-      if (summary) statusParts.push(summary);
-      setStatus(statusParts.join(" "));
-      if (el.csvChoiceMeta) el.csvChoiceMeta.textContent = "";
-    });
-  }
+  if (el.csvChoiceReplace) el.csvChoiceReplace.addEventListener("click", handleCsvChoiceReplace);
 
-  if (el.csvChoiceAppend) {
-    el.csvChoiceAppend.addEventListener("click", async () => {
-      if (!pendingCsvFile) return;
-      const current = pendingCsvFile;
-      const text = current.text || (await current.file?.text?.());
-      await appendUploadedCsv(text, current.file?.name || "uploaded.csv");
-      closeCsvChoiceModal();
-      pendingCsvFile = null;
-      const summary = formatCsvSummary(current.analysis, current.byteSize ?? getCsvByteSize(current.file, text));
-      const statusParts = ["CSV added to current feed."];
-      if (summary) statusParts.push(summary);
-      setStatus(statusParts.join(" "));
-      if (el.csvChoiceMeta) el.csvChoiceMeta.textContent = "";
-    });
-  }
+  if (el.csvChoiceAppend) el.csvChoiceAppend.addEventListener("click", handleCsvChoiceAppend);
 
   if (el.manageFeed) {
     el.manageFeed.addEventListener("click", () => {
@@ -3060,15 +2688,7 @@ async function boot() {
     }
 
     if (action === "share") {
-      retriggerAnimation(button, "is-share-animating");
-      const url = new URL(location.href);
-      url.hash = postId;
-      try {
-        await navigator.clipboard.writeText(url.toString());
-        setStatus("Link copied.");
-      } catch {
-        setStatus("Couldn't copy link.");
-      }
+      await handleShareAction(button, postId);
       return;
     }
 
@@ -3083,7 +2703,6 @@ async function boot() {
       const replyEl = postEl?.querySelector(".reply");
       if (replyEl instanceof HTMLElement) setReplyExpanded(replyEl, expanded);
       button.setAttribute("aria-expanded", String(expanded));
-      button.setAttribute("aria-label", expanded ? "Hide reply" : "View reply");
       return;
     }
 
@@ -3101,7 +2720,6 @@ async function boot() {
       }
       button.classList.toggle("is-bookmarked", nextBookmarked);
       button.setAttribute("aria-pressed", String(nextBookmarked));
-      button.setAttribute("aria-label", nextBookmarked ? "Remove bookmark" : "Bookmark");
       const label = button.querySelector(".label");
       if (label instanceof HTMLElement) label.textContent = nextBookmarked ? "Bookmarked" : "Bookmark";
       else button.textContent = nextBookmarked ? "Bookmarked" : "Bookmark";
@@ -3119,7 +2737,6 @@ async function boot() {
       const nextLiked = state.likedIds.has(postId);
       button.classList.toggle("is-liked", nextLiked);
       button.setAttribute("aria-pressed", String(nextLiked));
-      button.setAttribute("aria-label", nextLiked ? "Unlike" : "Like");
       const count = button.querySelector(".count");
       if (count instanceof HTMLElement) count.textContent = String(getLikeCount(postId));
       retriggerAnimation(button, "is-like-animating");

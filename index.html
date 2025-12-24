@@ -8,9 +8,11 @@
   <meta name="description" content="A tiny social-feed UI where each CSV row becomes a post." />
   <meta name="theme-color" content="#0f1419" />
   <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
   <link rel="manifest" href="./manifest.webmanifest" />
-  <link rel="stylesheet" href="./styles.css?v=21" />
-  <script src="./bootstrap.js?v=21"></script>
+  <link rel="stylesheet" href="./styles-critical.css?v=25" />
+  <link rel="stylesheet" href="./styles-deferred.css?v=25" media="print" data-defer-css />
+  <script src="./bootstrap.js?v=25" defer></script>
 </head>
 
 <body>
@@ -131,7 +133,7 @@
                 <polyline points="17 8 12 3 7 8" />
                 <line x1="12" y1="3" x2="12" y2="15" />
               </svg>
-              <span class="btn-text">Upload CSV</span>
+              <span class="btn-text sr-only">Upload CSV</span>
             </label>
           </div>
         </div>
@@ -288,7 +290,7 @@
     </div>
   </div>
 
-  <script type="module" src="./app.js?v=21"></script>
+  <script type="module" src="./app.js?v=25"></script>
 </body>
 
 </html>

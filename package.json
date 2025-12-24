@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "node server.js",
-    "start": "node server.js"
+    "start": "node server.js",
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.2"
   }
 }
-

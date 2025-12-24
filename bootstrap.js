@@ -1,14 +1,8 @@
 (function () {
   try {
     var saved = localStorage.getItem("pf_theme");
-    var theme =
-      saved === "dark" || saved === "light"
-        ? saved
-        : window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
-          ? "dark"
-          : "light";
-
-    if (theme === "dark") document.documentElement.setAttribute("data-theme", "dark");
+    if (saved === "dark") document.documentElement.setAttribute("data-theme", "dark");
+    else if (saved === "light") document.documentElement.setAttribute("data-theme", "light");
     else document.documentElement.removeAttribute("data-theme");
   } catch (e) {}
 })();

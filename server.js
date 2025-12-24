@@ -1,10 +1,28 @@
 import http from "node:http";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { brotliCompress, gzip } from "node:zlib";
+import { promisify } from "node:util";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const root = __dirname;
+const distRoot = path.join(__dirname, "dist");
+const root = existsSync(distRoot) ? distRoot : __dirname;
+
+const brotliCompressAsync = promisify(brotliCompress);
+const gzipAsync = promisify(gzip);
+
+const COMPRESSION_THRESHOLD = 1024;
+const COMPRESSIBLE_EXTS = new Set([
+  ".html",
+  ".css",
+  ".js",
+  ".json",
+  ".webmanifest",
+  ".csv",
+  ".svg",
+]);
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -13,6 +31,7 @@ const MIME = {
   ".json": "application/json; charset=utf-8",
   ".webmanifest": "application/manifest+json; charset=utf-8",
   ".svg": "image/svg+xml",
+  ".png": "image/png",
   ".csv": "text/csv; charset=utf-8",
 };
 
@@ -36,7 +55,31 @@ const server = http.createServer(async (req, res) => {
     const ext = path.extname(filePath).toLowerCase();
     const contentType = MIME[ext] || "application/octet-stream";
     const body = await readFile(filePath);
-    res.writeHead(200, { "Content-Type": contentType, "Cache-Control": "no-cache" });
+    const headers = { "Content-Type": contentType, "Cache-Control": "no-cache" };
+    const acceptEncoding = String(req.headers["accept-encoding"] || "");
+    const supportsBrotli = acceptEncoding.includes("br");
+    const supportsGzip = acceptEncoding.includes("gzip");
+    const isCompressible = COMPRESSIBLE_EXTS.has(ext);
+
+    if (isCompressible && body.length > COMPRESSION_THRESHOLD && (supportsBrotli || supportsGzip)) {
+      headers["Vary"] = "Accept-Encoding";
+      if (supportsBrotli) {
+        const compressed = await brotliCompressAsync(body);
+        headers["Content-Encoding"] = "br";
+        res.writeHead(200, headers);
+        res.end(compressed);
+        return;
+      }
+      if (supportsGzip) {
+        const compressed = await gzipAsync(body);
+        headers["Content-Encoding"] = "gzip";
+        res.writeHead(200, headers);
+        res.end(compressed);
+        return;
+      }
+    }
+
+    res.writeHead(200, headers);
     res.end(body);
   } catch {
     res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
